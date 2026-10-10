@@ -1,0 +1,229 @@
+// Schema do banco (PostgreSQL).
+// Modelos em português; no banco, tabelas e colunas ficam em snake_case português via @@map/@map.
+// A URL de conexão NÃO fica aqui: no Prisma 7 ela é definida em prisma.config.js (DATABASE_URL).
+//
+// Regras que o Prisma não expressa (CHECKs, índice único case-insensitive e os conteúdos iniciais)
+// estão escritas à mão no final de prisma/migrations/*_inicial/migration.sql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum StatusConsulta {
+  disponivel
+  solicitada
+  confirmada
+  recusada
+  realizada
+  cancelada
+
+  @@map("status_consulta")
+}
+
+enum TipoNotificacao {
+  medicamento
+  consulta
+  bemEstar
+
+  @@map("tipo_notificacao")
+}
+
+enum TipoConteudo {
+  documentario
+  curso
+  livro
+  artigo
+
+  @@map("tipo_conteudo")
+}
+
+// Hospital, plano de saúde ou organização de saúde. É a "fronteira" de isolamento dos dados:
+// administradores, profissionais e pacientes só enxergam o que pertence à sua organização.
+model Organizacao {
+  id           String   @id @default(uuid()) @db.Uuid
+  nome         String   @db.VarChar(120)
+  tipo         String   @db.VarChar(30) // Hospital | Plano de Saúde | Organização de Saúde (CHECK na migração)
+  criadoEm     DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm DateTime @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  administradores Administrador[]
+  profissionais   Profissional[]
+  pacientes       Paciente[]
+  conteudos       Conteudo[]
+
+  @@map("organizacoes")
+}
+
+// O Super Administrador NÃO fica no banco: suas credenciais vêm do .env.
+model Administrador {
+  id            String   @id @default(uuid()) @db.Uuid
+  organizacaoId String   @map("organizacao_id") @db.Uuid
+  nome          String   @db.VarChar(120)
+  email         String   @unique @db.VarChar(254)
+  senhaHash     String   @map("senha_hash") @db.VarChar(100)
+  // Incrementado em logout, troca/redefinição de senha: invalida todos os JWTs emitidos antes.
+  versaoToken   Int      @default(0) @map("versao_token")
+  criadoEm      DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm  DateTime @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao Organizacao @relation(fields: [organizacaoId], references: [id], onDelete: Cascade)
+
+  @@index([organizacaoId], map: "administradores_organizacao_id_idx")
+  @@map("administradores")
+}
+
+model Profissional {
+  id              String   @id @default(uuid()) @db.Uuid
+  organizacaoId   String   @map("organizacao_id") @db.Uuid
+  nome            String   @db.VarChar(120)
+  especialidade   String   @db.VarChar(40) // Médico(a) | Enfermeiro(a) | Técnico(a) em Enfermagem (CHECK)
+  crm             String?  @db.VarChar(30) // CRM/COREN/registro profissional
+  telefone        String?  @db.VarChar(11) // somente dígitos
+  email           String   @unique @db.VarChar(254)
+  senhaHash       String   @map("senha_hash") @db.VarChar(100)
+  senhaTemporaria Boolean  @default(true) @map("senha_temporaria") // true até o próprio usuário trocar a senha gerada
+  ativo           Boolean  @default(true) // false = não consegue entrar, mas o histórico clínico é preservado
+  versaoToken     Int      @default(0) @map("versao_token")
+  criadoEm        DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm    DateTime @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao   Organizacao    @relation(fields: [organizacaoId], references: [id], onDelete: Cascade)
+  pacientes     Paciente[]
+  consultas     Consulta[]
+  evolucoes     Evolucao[]
+  notificacoes  Notificacao[]
+  conteudos     Conteudo[]
+  recomendacoes Recomendacao[]
+
+  @@index([organizacaoId, nome], map: "profissionais_organizacao_id_nome_idx")
+  @@map("profissionais")
+}
+
+// Dados pessoais sensíveis (e-mail, data de nascimento e sexo) ficam criptografados em `dados_cifrados`
+// (AES-256-GCM). `email_indice` é um HMAC do e-mail: permite achar o paciente no login e garantir
+// e-mail único SEM guardar o e-mail em texto. O nome fica em texto para busca e ordenação.
+model Paciente {
+  id              String   @id @default(uuid()) @db.Uuid
+  organizacaoId   String   @map("organizacao_id") @db.Uuid
+  profissionalId  String?  @map("profissional_id") @db.Uuid
+  nome            String   @db.VarChar(120)
+  emailIndice     String   @unique @map("email_indice") @db.VarChar(64)
+  dadosCifrados   String   @map("dados_cifrados")
+  senhaHash       String   @map("senha_hash") @db.VarChar(100)
+  senhaTemporaria Boolean  @default(true) @map("senha_temporaria")
+  versaoToken     Int      @default(0) @map("versao_token")
+  criadoEm        DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm    DateTime @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao   Organizacao    @relation(fields: [organizacaoId], references: [id], onDelete: Cascade)
+  profissional  Profissional?  @relation(fields: [profissionalId], references: [id], onDelete: SetNull)
+  consultas     Consulta[]
+  evolucoes     Evolucao[]
+  notificacoes  Notificacao[]
+  recomendacoes Recomendacao[]
+
+  @@index([organizacaoId, nome], map: "pacientes_organizacao_id_nome_idx")
+  @@index([profissionalId, nome], map: "pacientes_profissional_id_nome_idx")
+  @@map("pacientes")
+}
+
+// Um horário da agenda do profissional. Nasce "disponivel" e percorre:
+//   disponivel → solicitada (paciente) → confirmada | recusada (profissional) → realizada | cancelada
+// Os dados clínicos (peso, pressão, glicemia...) só existem quando "realizada" e ficam criptografados.
+model Consulta {
+  id                    String         @id @default(uuid()) @db.Uuid
+  profissionalId        String         @map("profissional_id") @db.Uuid
+  pacienteId            String?        @map("paciente_id") @db.Uuid
+  data                  DateTime       @db.Date
+  hora                  String         @db.VarChar(5) // HH:MM
+  status                StatusConsulta @default(disponivel)
+  dadosClinicosCifrados String?        @map("dados_clinicos_cifrados")
+  realizadaEm           DateTime?      @map("realizada_em") @db.Timestamptz(3)
+  criadoEm              DateTime       @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm          DateTime       @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  profissional Profissional @relation(fields: [profissionalId], references: [id], onDelete: Cascade)
+  paciente     Paciente?    @relation(fields: [pacienteId], references: [id], onDelete: Cascade)
+
+  @@unique([profissionalId, data, hora], map: "consultas_profissional_data_hora_key")
+  @@index([profissionalId, data, hora], map: "consultas_profissional_id_data_hora_idx")
+  @@index([profissionalId, status], map: "consultas_profissional_id_status_idx")
+  @@index([pacienteId, data], map: "consultas_paciente_id_data_idx")
+  @@map("consultas")
+}
+
+// Notas de evolução clínica: imutáveis (não há edição nem exclusão pela API).
+model Evolucao {
+  id             String   @id @default(uuid()) @db.Uuid
+  pacienteId     String   @map("paciente_id") @db.Uuid
+  profissionalId String   @map("profissional_id") @db.Uuid
+  dadosCifrados  String   @map("dados_cifrados") // { texto, indicadorBemEstar }
+  criadoEm       DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  paciente     Paciente     @relation(fields: [pacienteId], references: [id], onDelete: Cascade)
+  profissional Profissional @relation(fields: [profissionalId], references: [id], onDelete: Cascade)
+
+  @@index([pacienteId, criadoEm], map: "evolucoes_paciente_id_criado_em_idx")
+  @@map("evolucoes")
+}
+
+// Título e mensagem podem citar medicamentos (dado de saúde): vão criptografados em `conteudo_cifrado`.
+model Notificacao {
+  id              String          @id @default(uuid()) @db.Uuid
+  pacienteId      String          @map("paciente_id") @db.Uuid
+  profissionalId  String          @map("profissional_id") @db.Uuid
+  tipo            TipoNotificacao
+  conteudoCifrado String          @map("conteudo_cifrado") // { titulo, mensagem }
+  lida            Boolean         @default(false)
+  criadoEm        DateTime        @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm    DateTime        @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  paciente     Paciente     @relation(fields: [pacienteId], references: [id], onDelete: Cascade)
+  profissional Profissional @relation(fields: [profissionalId], references: [id], onDelete: Cascade)
+
+  @@index([pacienteId, criadoEm], map: "notificacoes_paciente_id_criado_em_idx")
+  @@index([pacienteId, lida], map: "notificacoes_paciente_id_lida_idx")
+  @@index([profissionalId, criadoEm], map: "notificacoes_profissional_id_criado_em_idx")
+  @@map("notificacoes")
+}
+
+// Biblioteca de cursos, livros, documentários e artigos.
+// organizacao_id nulo = conteúdo global do sistema (visível a todos e imutável pela API).
+model Conteudo {
+  id            String       @id @default(uuid()) @db.Uuid
+  organizacaoId String?      @map("organizacao_id") @db.Uuid
+  criadoPorId   String?      @map("criado_por_id") @db.Uuid
+  titulo        String       @db.VarChar(150)
+  tipo          TipoConteudo
+  descricao     String       @db.VarChar(1000)
+  url           String?      @db.VarChar(500)
+  criadoEm      DateTime     @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm  DateTime     @default(now()) @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  organizacao   Organizacao?   @relation(fields: [organizacaoId], references: [id], onDelete: Cascade)
+  criadoPor     Profissional?  @relation(fields: [criadoPorId], references: [id], onDelete: SetNull)
+  recomendacoes Recomendacao[]
+
+  @@index([organizacaoId, criadoEm], map: "conteudos_organizacao_id_criado_em_idx")
+  @@map("conteudos")
+}
+
+model Recomendacao {
+  id             String   @id @default(uuid()) @db.Uuid
+  conteudoId     String   @map("conteudo_id") @db.Uuid
+  pacienteId     String   @map("paciente_id") @db.Uuid
+  profissionalId String   @map("profissional_id") @db.Uuid
+  criadoEm       DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  conteudo     Conteudo     @relation(fields: [conteudoId], references: [id], onDelete: Cascade)
+  paciente     Paciente     @relation(fields: [pacienteId], references: [id], onDelete: Cascade)
+  profissional Profissional @relation(fields: [profissionalId], references: [id], onDelete: Cascade)
+
+  @@unique([conteudoId, pacienteId], map: "recomendacoes_conteudo_paciente_key")
+  @@index([pacienteId, criadoEm], map: "recomendacoes_paciente_id_criado_em_idx")
+  @@map("recomendacoes")
+}
